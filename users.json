@@ -1,0 +1,26 @@
+{
+  "admin132": {
+    "password": "b432e23ee031decf22578675991666e497d1184246f62c0f1ac8739a702450f1",
+    "name": "Administrator",
+    "email": "admin@example.com",
+    "role": "admin",
+    "created_at": "2026-03-28T22:17:03.726760",
+    "last_login": "2026-04-07T22:36:35.676817"
+  },
+  "trader1": {
+    "password": "8f851d723d5fba36294b98968ae64119dbd1f5260900c05c424baf465e73e762",
+    "name": "Trader Satu",
+    "email": "trader1@example.com",
+    "role": "user",
+    "created_at": "2026-03-28T22:17:03.726829",
+    "last_login": null
+  },
+  "analyst": {
+    "password": "20249749412d73a3f5799f6f1dcf910e7b4aa3ce4de133b1f8a63c044792a4e9",
+    "name": "Market Analyst",
+    "email": "analyst@example.com",
+    "role": "analyst",
+    "created_at": "2026-03-28T22:17:03.726854",
+    "last_login": null
+  }
+}

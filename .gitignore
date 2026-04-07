@@ -1,0 +1,66 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# Environment variables
+.env
+*.env
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files (optional - kalau kamu punya dataset lokal)
+data/
+*.csv
+*.xlsx
+*.parquet
+
+# Model files (kalau besar)
+*.pkl
+*.joblib
+
+# Profiling files
+*.prof
+
+# Memory profiler / line profiler
+*.lprof
+*.mprof
+
+# Cache
+.cache/
+.pytest_cache/
+
+# Temporary files
+tmp/
+temp/
+
+# VS Code
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Python build
+build/
+dist/
+*.egg-info/
+
+
+*.html
