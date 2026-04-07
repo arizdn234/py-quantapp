@@ -1141,7 +1141,7 @@ def position_management_section(position_manager, ranking_results=None, cached_d
                     return 'background-color: #ff000022'
                 return ''
             
-            st.dataframe(df_positions.style.applymap(color_pnl, subset=['P&L']), 
+            st.dataframe(df_positions.style.map(color_pnl, subset=['P&L']), 
                         use_container_width=True, height=400)
             
             # Delete position option
@@ -1710,7 +1710,7 @@ def main_app():
                 return 'background-color: #ff000022'
             return ''
         
-        st.dataframe(df_rank.style.applymap(color_signal, subset=['Signal']), use_container_width=True, height=400)
+        st.dataframe(df_rank.style.map(color_signal, subset=['Signal']), use_container_width=True, height=400)
         
         # Score distribution chart
         st.subheader("📊 Score Distribution")
@@ -1736,7 +1736,7 @@ def main():
     # Initialize position manager in session state if not exists
     if 'position_manager' not in st.session_state:
         st.session_state.position_manager = PositionManager()
-        
+
     if not st.session_state.authenticated:
         login_page()
     else:
