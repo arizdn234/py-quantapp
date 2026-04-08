@@ -860,67 +860,57 @@ def load_from_csv(filename=DATA_CACHE_FILE):
     return None
 
 # ============================================
-# DATA CACHE FUNCTIONS (MODIFIED)
+# DATA CACHE FUNCTIONS (FULL CSV)
 # ============================================
 
-# Ubah ekstensi file menjadi .parquet
-DATA_CACHE_FILE = "stock_data_cache.parquet"
+DATA_CACHE_FILE = "stock_data_cache.csv"
 POSITION_FILE = "user_positions.json"
 
-def save_to_parquet(data_dict, filename=DATA_CACHE_FILE):
-    """Save cached data to Parquet (more efficient than CSV)"""
+def save_to_csv(data_dict, filename=DATA_CACHE_FILE):
+    """Save full dataframe to CSV (efficient enough for stock data)"""
     if not data_dict:
         return False
     
     try:
-        # Simpan setiap dataframe sebagai entri terpisah dalam dictionary
-        # Parquet lebih efisien untuk menyimpan data frame lengkap
-        for ticker, df in data_dict.items():
-            if df is not None and not df.empty:
-                # Simpan per ticker ke file parquet yang sama dengan key
-                # Alternatif: gunakan HDF5 atau simpan terpisah
-                pass
-        
-        # Cara simpan: konversi ke single dataframe dengan multi-index
+        # Simpan semua data dalam satu file CSV dengan multi-index
         records = []
         for ticker, df in data_dict.items():
             if df is not None and not df.empty:
                 df_copy = df.copy()
                 df_copy['ticker'] = ticker
-                df_copy['timestamp_save'] = datetime.now()
+                df_copy['date'] = df_copy.index
                 records.append(df_copy)
         
         if records:
-            combined_df = pd.concat(records, ignore_index=False)
-            # Reset index agar date menjadi kolom
-            combined_df = combined_df.reset_index()
-            combined_df.to_parquet(filename, index=False)
+            combined_df = pd.concat(records, ignore_index=True)
+            combined_df.to_csv(filename, index=False)
             return True
     except Exception as e:
-        st.error(f"Error saving to Parquet: {e}")
+        st.error(f"Error saving to CSV: {e}")
         return False
     return False
 
-def load_from_parquet(filename=DATA_CACHE_FILE):
-    """Load cached data from Parquet"""
+def load_from_csv(filename=DATA_CACHE_FILE):
+    """Load full dataframe from CSV"""
     if os.path.exists(filename):
         try:
-            df = pd.read_parquet(filename)
-            # Reconstruct data_dict
+            df = pd.read_csv(filename)
+            # Reconstruct data_dict with datetime index
             data_dict = {}
+            df['date'] = pd.to_datetime(df['date'])
             for ticker in df['ticker'].unique():
                 ticker_df = df[df['ticker'] == ticker].copy()
-                ticker_df = ticker_df.set_index('Date')
-                ticker_df = ticker_df.drop(['ticker', 'timestamp_save'], axis=1)
+                ticker_df = ticker_df.set_index('date')
+                ticker_df = ticker_df.drop('ticker', axis=1)
                 data_dict[ticker] = ticker_df
             return data_dict
         except Exception as e:
-            st.error(f"Error loading from Parquet: {e}")
+            st.error(f"Error loading from CSV: {e}")
             return None
     return None
 
 # ============================================
-# POSITION MANAGEMENT SYSTEM (NEW)
+# POSITION MANAGEMENT SYSTEM
 # ============================================
 
 class PositionManager:
@@ -1018,7 +1008,7 @@ class PositionManager:
             pos = self.positions[ticker_base]
             current_value = current_price * pos['quantity']
             pnl = current_value - pos['current_value']
-            pnl_pct = (pnl / pos['current_value']) * 100
+            pnl_pct = (pnl / pos['current_value']) * 100 if pos['current_value'] > 0 else 0
             return {
                 'current_value': current_value,
                 'pnl': pnl,
@@ -1133,23 +1123,23 @@ def position_management_section(position_manager, ranking_results=None, cached_d
             
             df_positions = pd.DataFrame(positions_data)
             
-            # Color code P&L
-            def color_pnl(val):
-                if isinstance(val, str) and val.startswith('Rp +'):
-                    return 'background-color: #00ff0022'
-                elif isinstance(val, str) and val.startswith('Rp -'):
-                    return 'background-color: #ff000022'
-                return ''
+            # Color code P&L using apply with axis=1 (fixed for pandas 2.1+)
+            def highlight_pnl(row):
+                if row['P&L'].startswith('Rp +'):
+                    return ['background-color: #00ff0022' if col == 'P&L' else '' for col in row.index]
+                elif row['P&L'].startswith('Rp -'):
+                    return ['background-color: #ff000022' if col == 'P&L' else '' for col in row.index]
+                return [''] * len(row)
             
-            st.dataframe(df_positions.style.map(color_pnl, subset=['P&L']), 
-                        use_container_width=True, height=400)
+            styled_df = df_positions.style.apply(highlight_pnl, axis=1)
+            st.dataframe(styled_df, use_container_width=True, height=400)
             
             # Delete position option
             st.markdown("#### Delete Position")
             col_del1, col_del2 = st.columns([3, 1])
             with col_del1:
                 ticker_to_delete = st.selectbox("Select ticker to delete", 
-                                                [p for p in positions.keys()],
+                                                list(positions.keys()),
                                                 key="delete_position_select")
             with col_del2:
                 if st.button("🗑️ Delete Position", key="btn_delete_position"):
@@ -1253,8 +1243,10 @@ def position_management_section(position_manager, ranking_results=None, cached_d
                 })
             
             df_analysis = pd.DataFrame(analysis_results)
-            df_analysis['P&L %'] = df_analysis['P&L %'].map(lambda x: f"{x:+.1f}%")
-            df_analysis['P&L'] = df_analysis['P&L'].map(lambda x: f"Rp {x:+,.0f}")
+            
+            # Format columns
+            df_analysis['P&L %'] = df_analysis['P&L %'].apply(lambda x: f"{x:+.1f}%" if isinstance(x, (int, float)) else x)
+            df_analysis['P&L'] = df_analysis['P&L'].apply(lambda x: f"Rp {x:+,.0f}" if isinstance(x, (int, float)) else x)
             
             st.dataframe(df_analysis, use_container_width=True)
             
@@ -1274,17 +1266,41 @@ def position_management_section(position_manager, ranking_results=None, cached_d
                 st.metric("🔴 Consider Sell", sell_count, help="Signal SELL/STRONG SELL")
             
             # Pie chart for position allocation
-            st.markdown("### 🥧 Position Allocation")
-            
-            fig = go.Figure(data=[go.Pie(
-                labels=[r['Ticker'] for r in analysis_results],
-                values=[r['Current Value'] for r in analysis_results],
-                hole=0.3,
-                marker_colors=['#4CAF50' if r['P&L %'].replace('%', '').replace('+', '').replace('-', '').isdigit() and float(r['P&L %'].replace('%', '').replace('+', '')) >= 0 
-                              else '#FF5252' for r in analysis_results]
-            )])
-            fig.update_layout(title="Portfolio Allocation by Current Value", template="plotly_dark", height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            if analysis_results:
+                st.markdown("### 🥧 Position Allocation")
+                
+                # Prepare data for pie chart
+                labels = []
+                values = []
+                colors = []
+                
+                for r in analysis_results:
+                    labels.append(r['Ticker'])
+                    values.append(r['Current Value'])
+                    
+                    # Handle P&L % which could be float or string
+                    pnl_val = r['P&L %']
+                    if isinstance(pnl_val, (int, float)):
+                        is_profit = pnl_val >= 0
+                    else:
+                        # It's a string, try to parse
+                        try:
+                            clean_val = str(pnl_val).replace('%', '').replace('+', '').replace('-', '')
+                            pnl_float = float(clean_val)
+                            is_profit = pnl_float >= 0
+                        except:
+                            is_profit = True
+                    
+                    colors.append('#4CAF50' if is_profit else '#FF5252')
+                
+                fig = go.Figure(data=[go.Pie(
+                    labels=labels,
+                    values=values,
+                    hole=0.3,
+                    marker_colors=colors
+                )])
+                fig.update_layout(title="Portfolio Allocation by Current Value", template="plotly_dark", height=400)
+                st.plotly_chart(fig, use_container_width=True)
 
 
 # ============================================
@@ -1535,6 +1551,7 @@ def main_app():
                     st.session_state.cached_data = data_dict
                     st.session_state.last_update = datetime.now()
                     
+                    # Save to CSV (full data)
                     save_to_csv(data_dict)
                     
                     st.info("Analyzing data...")
@@ -1557,7 +1574,14 @@ def main_app():
                 st.warning("No cached data to save. Click 'Retrain Model' first.")
     
     with col3:
-        st.markdown("### 🔄 Run Rerank")
+        if st.button("📂 Load from CSV", use_container_width=True, help="Load previously saved data from CSV"):
+            loaded_data = load_from_csv()
+            if loaded_data:
+                st.session_state.cached_data = loaded_data
+                st.success(f"✅ Data loaded from {DATA_CACHE_FILE}")
+                st.rerun()
+            else:
+                st.warning("No saved data found. Click 'Retrain Model' first.")
     
     # Rerank form (only rerank, no fetch)
     with st.expander("🎯 Rerank Options", expanded=False):
@@ -1697,20 +1721,30 @@ def main_app():
         display_results = filtered_results[:top_n]
         
         df_rank = pd.DataFrame([{
-            'Rank': i+1, 'Kode': r['ticker'], 'Nama': r['name'], 'Sektor': r['sector'],
-            'Harga': f"Rp {r['price']:,.0f}", 'Signal': r['signal'], 'Score': f"{r['score']:.0f}",
-            'Confidence': f"{r['confidence']:.0%}", 'RSI': f"{r['rsi']:.1f}",
-            'Return 5D': f"{r['return_5d']:+.1f}%", 'Volume': f"{r['volume_ratio']:.2f}x", 'Trend': r['trend']
+            'Rank': i+1, 
+            'Kode': r['ticker'], 
+            'Nama': r['name'], 
+            'Sektor': r['sector'],
+            'Harga': f"Rp {r['price']:,.0f}", 
+            'Signal': r['signal'], 
+            'Score': f"{r['score']:.0f}",
+            'Confidence': f"{r['confidence']:.0%}", 
+            'RSI': f"{r['rsi']:.1f}",
+            'Return 5D': f"{r['return_5d']:+.1f}%", 
+            'Volume': f"{r['volume_ratio']:.2f}x", 
+            'Trend': r['trend']
         } for i, r in enumerate(display_results)])
         
-        def color_signal(val):
-            if val in ['STRONG BUY', 'BUY']:
-                return 'background-color: #00ff0022'
-            elif val in ['STRONG SELL', 'SELL']:
-                return 'background-color: #ff000022'
-            return ''
+        # FIXED: Use apply with axis=1 instead of applymap
+        def highlight_signal(row):
+            if row['Signal'] in ['STRONG BUY', 'BUY']:
+                return ['background-color: #00ff0022' if col == 'Signal' else '' for col in row.index]
+            elif row['Signal'] in ['STRONG SELL', 'SELL']:
+                return ['background-color: #ff000022' if col == 'Signal' else '' for col in row.index]
+            return [''] * len(row)
         
-        st.dataframe(df_rank.style.map(color_signal, subset=['Signal']), use_container_width=True, height=400)
+        styled_df = df_rank.style.apply(highlight_signal, axis=1)
+        st.dataframe(styled_df, use_container_width=True, height=400)
         
         # Score distribution chart
         st.subheader("📊 Score Distribution")
@@ -1722,8 +1756,12 @@ def main_app():
         fig.update_layout(title="Top 20 Stocks by Score", template="plotly_dark", xaxis_title="Stock (5-Day Return)", yaxis_title="Score", height=500)
         st.plotly_chart(fig, use_container_width=True)
     
+    # ============================================
+    # POSITION MANAGEMENT SECTION (NEW)
+    # ============================================
+    
     position_management_section(position_manager, st.session_state.ranking_results, st.session_state.cached_data)
-
+    
     st.divider()
     st.caption("⚠️ Disclaimer: Analisis hanya untuk referensi, bukan rekomendasi investasi")
     if st.session_state.last_update:
@@ -1731,12 +1769,14 @@ def main_app():
     else:
         st.caption("📅 Belum ada data. Klik 'Retrain Model' untuk memulai.")
 
+
 def main():
     init_session_state()
+    
     # Initialize position manager in session state if not exists
     if 'position_manager' not in st.session_state:
         st.session_state.position_manager = PositionManager()
-
+    
     if not st.session_state.authenticated:
         login_page()
     else:
@@ -1744,6 +1784,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# modifikasi save_to_csv untuk menyimpan full dataframe menggunakan Parquet (lebih efisien dari CSV)  . apakah memungkinkan jika ada fitur/section (ditambahkan paling bawah) untuk memasukkan position? misal posisi sedang punya saham apa saja beserta avg, value, sehingga bisa analisis lebih lanjut (untuk on position saja)
