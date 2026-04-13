@@ -9,6 +9,11 @@ import os
 import numpy as np
 import hashlib
 import hmac
+import requests
+import base64
+from pathlib import Path
+from dotenv import load_dotenv
+
 
 # ============================================
 # PAGE CONFIG
@@ -243,6 +248,322 @@ class TickerManager:
         self.tickers = recommended.copy()
         self._save_tickers()
         return len(recommended)
+
+
+# ============================================
+# GITHUB STORAGE SYSTEM (FIXED)
+# ============================================
+
+import base64
+import requests
+from dotenv import load_dotenv
+import os
+from io import StringIO
+
+# Load environment variables for local development
+load_dotenv()
+
+class GitHubStorage:
+    def __init__(self, token, repo_owner, repo_name, branch="main"):
+        self.token = token
+        self.repo_owner = repo_owner
+        self.repo_name = repo_name
+        self.branch = branch
+        self.api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents"
+        self.headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+    
+    def _get_file_sha(self, file_path):
+        """Get file SHA if exists"""
+        url = f"{self.api_url}/{file_path}"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            return response.json().get('sha')
+        return None
+    
+    def upload_file(self, file_path, content, commit_message="Update file"):
+        """Upload file to GitHub"""
+        try:
+            # Encode content to base64
+            if isinstance(content, str):
+                content_bytes = content.encode('utf-8')
+            elif isinstance(content, bytes):
+                content_bytes = content
+            elif isinstance(content, dict) or isinstance(content, list):
+                content_bytes = json.dumps(content, indent=2).encode('utf-8')
+            else:
+                content_bytes = str(content).encode('utf-8')
+            
+            encoded_content = base64.b64encode(content_bytes).decode('utf-8')
+            
+            # Get existing file SHA
+            sha = self._get_file_sha(file_path)
+            
+            # Prepare payload
+            payload = {
+                "message": commit_message,
+                "content": encoded_content,
+                "branch": self.branch
+            }
+            if sha:
+                payload["sha"] = sha
+            
+            # Upload
+            url = f"{self.api_url}/{file_path}"
+            response = requests.put(url, headers=self.headers, json=payload)
+            
+            return response.status_code in [200, 201]
+        except Exception as e:
+            st.error(f"GitHub upload error: {e}")
+            return False
+    
+    def download_file(self, file_path):
+        """Download file from GitHub"""
+        try:
+            url = f"{self.api_url}/{file_path}"
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code == 200:
+                content = response.json()
+                decoded = base64.b64decode(content['content']).decode('utf-8')
+                
+                # Parse JSON if applicable
+                if file_path.endswith('.json'):
+                    return json.loads(decoded)
+                elif file_path.endswith('.csv'):
+                    return decoded  # Return raw string content
+                return decoded
+            return None
+        except Exception as e:
+            st.error(f"GitHub download error: {e}")
+            return None
+    
+    def upload_dataframe_csv(self, file_path, df, commit_message="Update CSV data"):
+        """Upload dataframe as CSV to GitHub"""
+        if df is not None and not df.empty:
+            csv_content = df.to_csv(index=False)
+            return self.upload_file(file_path, csv_content, commit_message)
+        return False
+    
+    def download_dataframe_csv(self, file_path):
+        """Download CSV from GitHub as dataframe"""
+        content = self.download_file(file_path)
+        if content and isinstance(content, str):
+            try:
+                # Check if content is empty
+                if not content.strip():
+                    st.warning(f"CSV file {file_path} is empty")
+                    return None
+                
+                # Try to read CSV
+                df = pd.read_csv(StringIO(content))
+                
+                # Check if dataframe has columns
+                if df.empty or len(df.columns) == 0:
+                    st.warning(f"CSV file {file_path} has no columns")
+                    return None
+                
+                return df
+            except Exception as e:
+                st.error(f"Error parsing CSV: {e}")
+                return None
+        return None
+
+
+def get_github_storage():
+    """Initialize GitHub storage from secrets (cloud) or env (local)"""
+    
+    # Try to get from st.secrets first (for Streamlit Cloud)
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo_owner = st.secrets["GITHUB_REPO_OWNER"]
+        repo_name = st.secrets["GITHUB_REPO_NAME"]
+        return GitHubStorage(token, repo_owner, repo_name)
+    except:
+        pass
+    
+    # Fallback to environment variables (for local development)
+    token = os.getenv("GITHUB_TOKEN")
+    repo_owner = os.getenv("GITHUB_REPO_OWNER")
+    repo_name = os.getenv("GITHUB_REPO_NAME")
+    
+    if token and repo_owner and repo_name:
+        return GitHubStorage(token, repo_owner, repo_name)
+    
+    return None
+
+
+def github_save_section(ticker_manager, position_manager, cached_data):
+    """Section untuk menyimpan data ke GitHub"""
+    
+    st.markdown("---")
+    st.header("☁️ Cloud Backup (GitHub)")
+    
+    github = get_github_storage()
+    
+    if github is None:
+        st.warning("⚠️ GitHub storage not configured.")
+        
+        # Show instructions for local setup
+        if not os.getenv("GITHUB_TOKEN"):
+            st.info("📝 For local development, create .env file with:\n"
+                   "GITHUB_TOKEN=your_token\n"
+                   "GITHUB_REPO_OWNER=your_username\n"
+                   "GITHUB_REPO_NAME=your_repo")
+        return
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("💾 Save All to GitHub", use_container_width=True, type="primary"):
+            with st.spinner("Saving to GitHub..."):
+                success_count = 0
+                failed_files = []
+                
+                # Save tickers
+                tickers_data = ticker_manager.get_tickers()
+                if github.upload_file("tickers_idn.json", tickers_data, "Update tickers list"):
+                    success_count += 1
+                    st.toast("✅ Tickers saved", icon="✅")
+                else:
+                    failed_files.append("tickers_idn.json")
+                
+                # Save positions
+                positions_data = position_manager.get_all_positions()
+                if github.upload_file("user_positions.json", positions_data, "Update positions"):
+                    success_count += 1
+                    st.toast("✅ Positions saved", icon="✅")
+                else:
+                    failed_files.append("user_positions.json")
+                
+                # Save cached data
+                if cached_data:
+                    # Combine all dataframes
+                    combined_records = []
+                    for ticker, df in cached_data.items():
+                        if df is not None and not df.empty:
+                            df_copy = df.copy()
+                            df_copy['ticker'] = ticker
+                            df_copy['date'] = df_copy.index
+                            combined_records.append(df_copy)
+                    
+                    if combined_records:
+                        combined_df = pd.concat(combined_records, ignore_index=True)
+                        if github.upload_dataframe_csv("stock_data_cache.csv", combined_df, "Update cache"):
+                            success_count += 1
+                            st.toast("✅ Cache saved", icon="✅")
+                        else:
+                            failed_files.append("stock_data_cache.csv")
+                    else:
+                        failed_files.append("stock_data_cache.csv (no data)")
+                else:
+                    failed_files.append("stock_data_cache.csv (no cache)")
+                
+                if success_count == 3:
+                    st.success("✅ All data saved to GitHub successfully!")
+                elif success_count > 0:
+                    st.warning(f"⚠️ Saved {success_count}/3 files to GitHub. Failed: {', '.join(failed_files)}")
+                else:
+                    st.error("❌ Failed to save data to GitHub")
+    
+    with col2:
+        if st.button("📥 Load All from GitHub", use_container_width=True):
+            with st.spinner("Loading from GitHub..."):
+                load_count = 0
+                failed_files = []
+                
+                # Load tickers
+                tickers_data = github.download_file("tickers_idn.json")
+                if tickers_data:
+                    current_tickers = ticker_manager.get_tickers()
+                    new_count = 0
+                    for ticker in tickers_data:
+                        if ticker not in current_tickers:
+                            ticker_manager.add_ticker(ticker)
+                            new_count += 1
+                    load_count += 1
+                    st.toast(f"✅ Tickers loaded ({new_count} new)", icon="✅")
+                else:
+                    failed_files.append("tickers_idn.json")
+                
+                # Load positions
+                positions_data = github.download_file("user_positions.json")
+                if positions_data:
+                    new_count = 0
+                    for ticker, pos in positions_data.items():
+                        if ticker not in position_manager.get_all_positions():
+                            position_manager.add_position(
+                                pos['full_ticker'], 
+                                pos['entry_price'], 
+                                pos['quantity'],
+                                pos['entry_date'],
+                                pos.get('notes', '')
+                            )
+                            new_count += 1
+                    load_count += 1
+                    st.toast(f"✅ Positions loaded ({new_count} new)", icon="✅")
+                else:
+                    failed_files.append("user_positions.json")
+                
+                # Load cached data
+                csv_data = github.download_dataframe_csv("stock_data_cache.csv")
+                if csv_data is not None and not csv_data.empty and len(csv_data.columns) > 0:
+                    data_dict = {}
+                    if 'ticker' in csv_data.columns and 'date' in csv_data.columns:
+                        for ticker in csv_data['ticker'].unique():
+                            ticker_df = csv_data[csv_data['ticker'] == ticker].copy()
+                            if 'date' in ticker_df.columns:
+                                ticker_df['date'] = pd.to_datetime(ticker_df['date'])
+                                ticker_df = ticker_df.set_index('date')
+                                ticker_df = ticker_df.drop('ticker', axis=1)
+                                data_dict[ticker] = ticker_df
+                        
+                        if data_dict:
+                            st.session_state.cached_data = data_dict
+                            load_count += 1
+                            st.toast(f"✅ Cache loaded ({len(data_dict)} tickers)", icon="✅")
+                        else:
+                            failed_files.append("stock_data_cache.csv (no valid data)")
+                    else:
+                        failed_files.append("stock_data_cache.csv (missing columns)")
+                else:
+                    failed_files.append("stock_data_cache.csv")
+                
+                if load_count == 3:
+                    st.success("✅ All data loaded from GitHub successfully!")
+                    st.rerun()
+                elif load_count > 0:
+                    st.warning(f"⚠️ Loaded {load_count}/3 files from GitHub. Failed: {', '.join(failed_files)}")
+                else:
+                    st.error("❌ Failed to load data from GitHub")
+    
+    with col3:
+        if st.button("🔄 Sync to GitHub (Force)", use_container_width=True):
+            with st.spinner("Syncing to GitHub..."):
+                # Force save all
+                tickers_data = ticker_manager.get_tickers()
+                github.upload_file("tickers_idn.json", tickers_data, "Force sync tickers")
+                
+                positions_data = position_manager.get_all_positions()
+                github.upload_file("user_positions.json", positions_data, "Force sync positions")
+                
+                if cached_data:
+                    combined_records = []
+                    for ticker, df in cached_data.items():
+                        if df is not None and not df.empty:
+                            df_copy = df.copy()
+                            df_copy['ticker'] = ticker
+                            df_copy['date'] = df_copy.index
+                            combined_records.append(df_copy)
+                    
+                    if combined_records:
+                        combined_df = pd.concat(combined_records, ignore_index=True)
+                        github.upload_dataframe_csv("stock_data_cache.csv", combined_df, "Force sync cache")
+                
+                st.success("✅ Force sync completed!")
+
 
 # ============================================
 # ENHANCED ANALYSIS ENGINE
@@ -1757,7 +2078,13 @@ def main_app():
         st.plotly_chart(fig, use_container_width=True)
     
     # ============================================
-    # POSITION MANAGEMENT SECTION (NEW)
+    # GITHUB BACKUP SECTION
+    # ============================================
+    
+    github_save_section(ticker_manager, position_manager, st.session_state.cached_data)
+    
+    # ============================================
+    # POSITION MANAGEMENT SECTION
     # ============================================
     
     position_management_section(position_manager, st.session_state.ranking_results, st.session_state.cached_data)
