@@ -251,7 +251,7 @@ class TickerManager:
 
 
 # ============================================
-# GITHUB STORAGE SYSTEM (FIXED)
+# GITHUB STORAGE SYSTEM
 # ============================================
 
 import base64
@@ -259,6 +259,12 @@ import requests
 from dotenv import load_dotenv
 import os
 from io import StringIO
+
+# implement of using compression
+import gzip
+
+def compress_content(content_bytes):
+    return gzip.compress(content_bytes)
 
 # Load environment variables for local development
 load_dotenv()
@@ -296,7 +302,10 @@ class GitHubStorage:
             else:
                 content_bytes = str(content).encode('utf-8')
             
-            encoded_content = base64.b64encode(content_bytes).decode('utf-8')
+            # compress first
+            compressed = gzip.compress(content_bytes)
+
+            encoded_content = base64.b64encode(compressed).decode('utf-8')
             
             # Get existing file SHA
             sha = self._get_file_sha(file_path)
@@ -320,26 +329,49 @@ class GitHubStorage:
             return False
     
     def download_file(self, file_path):
-        """Download file from GitHub"""
         try:
             url = f"{self.api_url}/{file_path}"
             response = requests.get(url, headers=self.headers)
-            
+
             if response.status_code == 200:
-                content = response.json()
-                decoded = base64.b64decode(content['content']).decode('utf-8')
-                
-                # Parse JSON if applicable
-                if file_path.endswith('.json'):
-                    return json.loads(decoded)
-                elif file_path.endswith('.csv'):
-                    return decoded  # Return raw string content
-                return decoded
+                data = response.json()
+
+                # ✅ FILE BESAR → pakai download_url
+                if data.get("download_url"):
+                    raw_response = requests.get(data["download_url"])
+                    if raw_response.status_code == 200:
+                        # content = raw_response.text
+                        raw_bytes = raw_response.content
+
+                        try:
+                            decompressed = gzip.decompress(raw_bytes).decode('utf-8')
+                        except:
+                            decompressed = raw_bytes.decode('utf-8')
+
+                        if file_path.endswith('.json'):
+                            return json.loads(decompressed)
+
+                        return decompressed
+                        
+                        if file_path.endswith('.json'):
+                            return json.loads(content)
+                        return content
+                    return None
+
+                # ✅ FILE KECIL → base64
+                if data.get("content"):
+                    decoded = base64.b64decode(data['content']).decode('utf-8')
+
+                    if file_path.endswith('.json'):
+                        return json.loads(decoded)
+                    return decoded
+
             return None
+
         except Exception as e:
             st.error(f"GitHub download error: {e}")
             return None
-    
+
     def upload_dataframe_csv(self, file_path, df, commit_message="Update CSV data"):
         """Upload dataframe as CSV to GitHub"""
         if df is not None and not df.empty:
@@ -446,11 +478,17 @@ def github_save_section(ticker_manager, position_manager, cached_data):
                         if df is not None and not df.empty:
                             df_copy = df.copy()
                             df_copy['ticker'] = ticker
-                            df_copy['date'] = df_copy.index
+                            df_copy['date'] = df_copy.index.strftime('%Y-%m-%d')  # Convert to string
                             combined_records.append(df_copy)
                     
                     if combined_records:
                         combined_df = pd.concat(combined_records, ignore_index=True)
+                        # Reorder columns for better readability
+                        cols = ['date', 'ticker', 'Open', 'High', 'Low', 'Close', 'Volume']
+                        existing_cols = [c for c in cols if c in combined_df.columns]
+                        other_cols = [c for c in combined_df.columns if c not in cols]
+                        combined_df = combined_df[existing_cols + other_cols]
+                        
                         if github.upload_dataframe_csv("stock_data_cache.csv", combined_df, "Update cache"):
                             success_count += 1
                             st.toast("✅ Cache saved", icon="✅")
@@ -507,29 +545,62 @@ def github_save_section(ticker_manager, position_manager, cached_data):
                 else:
                     failed_files.append("user_positions.json")
                 
-                # Load cached data
-                csv_data = github.download_dataframe_csv("stock_data_cache.csv")
-                if csv_data is not None and not csv_data.empty and len(csv_data.columns) > 0:
-                    data_dict = {}
-                    if 'ticker' in csv_data.columns and 'date' in csv_data.columns:
-                        for ticker in csv_data['ticker'].unique():
-                            ticker_df = csv_data[csv_data['ticker'] == ticker].copy()
-                            if 'date' in ticker_df.columns:
-                                ticker_df['date'] = pd.to_datetime(ticker_df['date'])
-                                ticker_df = ticker_df.set_index('date')
-                                ticker_df = ticker_df.drop('ticker', axis=1)
-                                data_dict[ticker] = ticker_df
-                        
-                        if data_dict:
-                            st.session_state.cached_data = data_dict
-                            load_count += 1
-                            st.toast(f"✅ Cache loaded ({len(data_dict)} tickers)", icon="✅")
+                # Load cached data - FIXED VERSION
+                csv_content = github.download_file("stock_data_cache.csv")
+                if csv_content and isinstance(csv_content, str):
+                    try:
+                        # Check if content is empty
+                        if not csv_content.strip():
+                            st.warning("CSV file is empty")
+                            failed_files.append("stock_data_cache.csv (empty)")
                         else:
-                            failed_files.append("stock_data_cache.csv (no valid data)")
-                    else:
-                        failed_files.append("stock_data_cache.csv (missing columns)")
+                            # Read CSV directly from string
+                            df = pd.read_csv(StringIO(csv_content))
+                            
+                            # Check if dataframe has required columns
+                            if df.empty:
+                                st.warning("CSV file has no data")
+                                failed_files.append("stock_data_cache.csv (no data)")
+                            elif len(df.columns) == 0:
+                                st.warning("CSV file has no columns")
+                                failed_files.append("stock_data_cache.csv (no columns)")
+                            else:
+                                # Check if required columns exist
+                                required_cols = ['date', 'ticker']
+                                missing_cols = [col for col in required_cols if col not in df.columns]
+                                
+                                if missing_cols:
+                                    st.warning(f"Missing columns: {missing_cols}")
+                                    st.info(f"Available columns: {list(df.columns)}")
+                                    failed_files.append(f"stock_data_cache.csv (missing {missing_cols})")
+                                else:
+                                    # Reconstruct data_dict
+                                    data_dict = {}
+                                    df['date'] = pd.to_datetime(df['date'])
+                                    
+                                    for ticker in df['ticker'].unique():
+                                        ticker_df = df[df['ticker'] == ticker].copy()
+                                        ticker_df = ticker_df.set_index('date')
+                                        ticker_df = ticker_df.drop('ticker', axis=1)
+                                        
+                                        # Ensure numeric columns
+                                        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                                            if col in ticker_df.columns:
+                                                ticker_df[col] = pd.to_numeric(ticker_df[col], errors='coerce')
+                                        
+                                        data_dict[ticker] = ticker_df
+                                    
+                                    if data_dict:
+                                        st.session_state.cached_data = data_dict
+                                        load_count += 1
+                                        st.toast(f"✅ Cache loaded ({len(data_dict)} tickers, {len(df)} rows)", icon="✅")
+                                    else:
+                                        failed_files.append("stock_data_cache.csv (no valid tickers)")
+                    except Exception as e:
+                        st.error(f"Error parsing CSV: {str(e)}")
+                        failed_files.append(f"stock_data_cache.csv (parse error: {str(e)[:50]})")
                 else:
-                    failed_files.append("stock_data_cache.csv")
+                    failed_files.append("stock_data_cache.csv (download failed)")
                 
                 if load_count == 3:
                     st.success("✅ All data loaded from GitHub successfully!")
@@ -555,11 +626,15 @@ def github_save_section(ticker_manager, position_manager, cached_data):
                         if df is not None and not df.empty:
                             df_copy = df.copy()
                             df_copy['ticker'] = ticker
-                            df_copy['date'] = df_copy.index
+                            df_copy['date'] = df_copy.index.strftime('%Y-%m-%d')
                             combined_records.append(df_copy)
                     
                     if combined_records:
                         combined_df = pd.concat(combined_records, ignore_index=True)
+                        cols = ['date', 'ticker', 'Open', 'High', 'Low', 'Close', 'Volume']
+                        existing_cols = [c for c in cols if c in combined_df.columns]
+                        other_cols = [c for c in combined_df.columns if c not in cols]
+                        combined_df = combined_df[existing_cols + other_cols]
                         github.upload_dataframe_csv("stock_data_cache.csv", combined_df, "Force sync cache")
                 
                 st.success("✅ Force sync completed!")
@@ -1750,8 +1825,8 @@ def login_page():
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown('<div class="login-container">', unsafe_allow_html=True)
-        st.image("https://img.icons8.com/color/96/000000/stock.png", width=80)
+        # st.markdown('<div class="login-container">', unsafe_allow_html=True)
+        # st.image("https://img.icons8.com/color/96/000000/stock.png", width=80)
         st.title("📊 Saham Indo Dashboard")
         st.markdown("### Enhanced Analysis System")
         
